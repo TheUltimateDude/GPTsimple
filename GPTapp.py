@@ -32,22 +32,30 @@ def hash_password(password: str) -> str:
 
 def check_credentials(username: str, password: str) -> bool:
     """Validate username and password against DB."""
+    username = username.strip()
+    password = password.strip()
     if not username or not password:
         return False
     with engine.connect() as conn:
         res = conn.execute(sa.select(users).where(users.c.username == username)).fetchone()
-        if res and res["password_hash"] == hash_password(password):
-            return True
+        if res is not None:
+            hash_pwd = hash_password(password)
+            # Uncomment these for debugging
+            # st.write(f"DEBUG: username={username} DBhash={res['password_hash']} InputHash={hash_pwd}")
+            return res["password_hash"] == hash_pwd
         return False
 
 def user_exists(username: str) -> bool:
     """Check if a username is already taken."""
+    username = username.strip()
     with engine.connect() as conn:
         res = conn.execute(sa.select(users).where(users.c.username == username)).fetchone()
         return bool(res)
 
 def register_user(username: str, password: str) -> str:
     """Register a new user. Returns empty string if success, else an error message."""
+    username = username.strip()
+    password = password.strip()
     if not username or not password:
         return "Username and password cannot be empty."
     if len(username) < 3 or len(username) > 20:
@@ -62,9 +70,16 @@ def register_user(username: str, password: str) -> str:
         conn.execute(users.insert().values(username=username, password_hash=hash_password(password)))
     return ""
 
+def get_all_users_for_debug():
+    """Development: list all users and hashes."""
+    with engine.connect() as conn:
+        res = conn.execute(sa.select(users)).fetchall()
+        return [(row['username'], row['password_hash']) for row in res]
+
 # ------------------- MEMORY FUNCTIONS -------------------
 def load_history(username: str) -> List[Dict[str, str]]:
     """Load chat history from DB."""
+    username = username.strip()
     with engine.connect() as conn:
         res = conn.execute(sa.select(chats).where(chats.c.username == username)).fetchone()
         if res:
@@ -74,6 +89,7 @@ def load_history(username: str) -> List[Dict[str, str]]:
 
 def save_history(username: str, messages: List[Dict[str, str]]) -> None:
     """Save chat history to DB."""
+    username = username.strip()
     with engine.connect() as conn:
         exists = conn.execute(sa.select(chats).where(chats.c.username == username)).first()
         if exists:
@@ -109,12 +125,12 @@ if "login_error" not in st.session_state:
 def signup_page() -> None:
     """Render the sign-up page UI."""
     st.subheader("Sign up for a new account")
-    with st.form("signup_form", clear_on_submit=False):
+    with st.form("signup_form", clear_on_submit=True):
         new_username = st.text_input("Choose a username", key="signup_user")
         new_password = st.text_input("Choose a password", type="password", key="signup_pass")
         submit = st.form_submit_button("Register")
         if submit:
-            error = register_user(new_username.strip(), new_password)
+            error = register_user(new_username, new_password)
             if error:
                 st.session_state.signup_error = error
             else:
@@ -132,12 +148,12 @@ def signup_page() -> None:
 def login_page() -> None:
     """Render the login page UI."""
     st.subheader("Login")
-    with st.form("login_form", clear_on_submit=False):
+    with st.form("login_form", clear_on_submit=True):
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
         submitted = st.form_submit_button("Login")
         if submitted:
-            if check_credentials(username.strip(), password):
+            if check_credentials(username, password):
                 st.session_state.username = username.strip()
                 st.session_state.page = "chat"
                 st.session_state.login_error = ""
@@ -150,6 +166,10 @@ def login_page() -> None:
         st.session_state.page = "signup"
         st.session_state.login_error = ""
         st.experimental_rerun()
+    # DEV ONLY: Show all registered users/hashes for debugging (REMOVE for prod!)
+    debug_users = get_all_users_for_debug()
+    with st.expander("Show registered users (for dev/debug only)"):
+        st.write(debug_users)
 
 def chat_page() -> None:
     """Render the chat UI and interactions."""
