@@ -1,130 +1,151 @@
 import streamlit as st
 from openai import OpenAI
-import sqlalchemy as sa
-from sqlalchemy import create_engine, Table, Column, Integer, String, Text, MetaData
+from sqlalchemy import create_engine, Table, Column, Integer, String, Text, MetaData, select
 import hashlib
 import ast
 from typing import List, Dict
 
-# ------------------- DATABASE SETUP -------------------
-engine = create_engine('sqlite:///chat_app.db')
+engine = create_engine("sqlite:///chat_app.db", future=True)
 metadata = MetaData()
 
 users = Table(
-    'users', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('username', String, unique=True, nullable=False),
-    Column('password_hash', String, nullable=False)
+    "users", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, unique=True, nullable=False),
+    Column("password_hash", String, nullable=False),
 )
 
 chats = Table(
-    'chats', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('username', String, nullable=False),
-    Column('messages', Text, nullable=False)
+    "chats", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("messages", Text, nullable=False),
 )
+
 metadata.create_all(engine)
 
-# ------------------- AUTH FUNCTIONS -------------------
+
 def hash_password(password: str) -> str:
-    """Hash a password for storing."""
     return hashlib.sha256(password.encode()).hexdigest()
 
-def check_credentials(username: str, password: str) -> bool:
-    """Validate username and password against DB."""
-    if not username or not password:
-        return False
-    with engine.connect() as conn:
-        res = conn.execute(sa.select(users).where(users.c.username == username)).fetchone()
-        if res and res["password_hash"] == hash_password(password):
-            return True
-        return False
 
-def register_user(username: str, password: str) -> bool:
-    """Register a new user. Return True if successful, False if username exists."""
-    if not username or not password:
-        return False
+def user_exists(username: str) -> bool:
+    username = username.lower().strip()
     with engine.connect() as conn:
-        existing = conn.execute(sa.select(users).where(users.c.username == username)).fetchone()
-        if existing:
-            return False  # Username exists
+        return conn.execute(select(users).where(users.c.username == username)).first() is not None
+
+
+def register_user(username: str, password: str) -> str:
+    username, password = username.lower().strip(), password.strip()
+    if not username or not password:
+        return "Username and password cannot be empty."
+    if len(username) < 3 or len(username) > 20 or not username.isalnum():
+        return "Username must be 3-20 alphanumeric characters."
+    if len(password) < 6:
+        return "Password must be at least 6 characters."
+    if user_exists(username):
+        return "Username already taken."
+    with engine.begin() as conn:
         conn.execute(users.insert().values(username=username, password_hash=hash_password(password)))
-        return True
+    return ""
 
-# ------------------- MEMORY FUNCTIONS -------------------
-def load_history(username: str) -> List[Dict[str, str]]:
-    """Load chat history from DB."""
+
+def check_credentials(username: str, password: str) -> bool:
+    username, password = username.lower().strip(), password.strip()
     with engine.connect() as conn:
-        res = conn.execute(sa.select(chats).where(chats.c.username == username)).fetchone()
-        if res:
-            return ast.literal_eval(res['messages'])
-        else:
-            return [{"role": "system", "content": "You are a helpful assistant."}]
+        user = conn.execute(select(users).where(users.c.username == username)).fetchone()
+        return user is not None and user.password_hash == hash_password(password)
+
+
+def load_history(username: str) -> List[Dict[str, str]]:
+    username = username.lower().strip()
+    with engine.connect() as conn:
+        record = conn.execute(select(chats).where(chats.c.username == username)).fetchone()
+        return ast.literal_eval(record.messages) if record else [{"role": "system", "content": "You are a helpful assistant."}]
+
 
 def save_history(username: str, messages: List[Dict[str, str]]) -> None:
-    """Save chat history to DB."""
-    with engine.connect() as conn:
-        exists = conn.execute(sa.select(chats).where(chats.c.username == username)).first()
-        if exists:
+    username = username.lower().strip()
+    with engine.begin() as conn:
+        record_exists = conn.execute(select(chats).where(chats.c.username == username)).first()
+        if record_exists:
             conn.execute(chats.update().where(chats.c.username == username).values(messages=str(messages)))
         else:
             conn.execute(chats.insert().values(username=username, messages=str(messages)))
 
-# ------------------- OPENAI FUNCTION -------------------
+
 def get_response(messages: List[Dict[str, str]], api_key: str) -> str:
-    """
-    Query OpenAI API and return reply.
-    """
     client = OpenAI(api_key=api_key)
-    chat_response = client.chat.completions.create(
-        model="gpt-4-1106-preview",  # Or your preferred GPT-4.1 endpoint
+    response = client.chat.completions.create(
+        model="gpt-4-1106-preview",
         messages=messages,
-        max_tokens=700
+        max_tokens=700,
     )
-    return chat_response.choices[0].message.content
+    return response.choices[0].message.content
 
-# ------------------- STREAMLIT UI -------------------
-st.title("GPT-4.1 Chat App with Sign Up/Login & Memory")
 
-if "page" not in st.session_state:
-    st.session_state.page = "login"
-if "username" not in st.session_state:
-    st.session_state.username = ""
+st.title("GPT-4.1 Chat App with Authentication and Memory")
 
-# ---- SIGNUP PAGE ----
-def signup_page() -> None:
-    """Render the sign-up page UI."""
-    st.subheader("Sign up for a new account")
-    new_username = st.text_input("Choose a username")
-    new_password = st.text_input("Choose a password", type="password")
-    if st.button("Register"):
-        if register_user(new_username, new_password):
-            st.success("Registration successful. Please log in.")
-            st.session_state.page = "login"
-        else:
-            st.error("Username already exists or invalid details.")
+state_defaults = {
+    "page": "login",
+    "username": "",
+    "signup_err": "",
+    "login_err": "",
+    "registered": False,
+}
 
-# ---- LOGIN PAGE ----
-def login_page() -> None:
-    """Render the login page UI."""
-    st.subheader("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Login"):
-            if check_credentials(username, password):
-                st.session_state.username = username
-                st.session_state.page = "chat"
+for key, val in state_defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+
+def signup():
+    st.subheader("Create account")
+    with st.form("signup_form", clear_on_submit=True):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Register"):
+            error = register_user(username, password)
+            if error:
+                st.session_state.signup_err = error
             else:
-                st.error("Invalid username or password.")
-    with col2:
-        if st.button("Go to Signup"):
-            st.session_state.page = "signup"
+                st.session_state.signup_err = ""
+                st.session_state.registered = True
+                st.session_state.page = "login"
+                st.rerun()
+    if st.session_state.signup_err:
+        st.error(st.session_state.signup_err)
+    if st.button("Back to Login"):
+        st.session_state.page = "login"
+        st.signup_err = ""
+        st.rerun()
 
-# ---- CHAT PAGE ----
-def chat_page() -> None:
-    """Render the chat UI and interactions."""
+
+def login():
+    st.subheader("Login")
+    if st.session_state.registered:
+        st.success("Registration successful. Please log in.")
+        st.session_state.registered = False
+    with st.form("login_form", clear_on_submit=True):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Login"):
+            if check_credentials(username, password):
+                st.session_state.username = username.lower().strip()
+                st.session_state.page = "chat"
+                st.login_err = ""
+                st.rerun()
+            else:
+                st.session_state.login_err = "Invalid username or password."
+    if st.session_state.login_err:
+        st.error(st.session_state.login_err)
+    if st.button("Create an account"):
+        st.session_state.page = "signup"
+        st.login_err = ""
+        st.rerun()
+
+
+def chat():
     st.write(f"Welcome, **{st.session_state.username}**!")
     if st.button("Logout"):
         st.session_state.page = "login"
@@ -132,35 +153,29 @@ def chat_page() -> None:
         st.session_state.pop("messages", None)
         st.rerun()
 
-    api_key = st.text_input("Your OpenAI API Key (never stored)", type="password")
+    api_key = st.text_input("OpenAI API Key (not stored)", type="password")
     if st.session_state.username and "messages" not in st.session_state:
-        st.session_state["messages"] = load_history(st.session_state.username)
+        st.session_state.messages = load_history(st.session_state.username)
 
     if "messages" in st.session_state:
         for msg in st.session_state.messages[1:]:
-            align = "user" if msg["role"] == "user" else "assistant"
-            st.chat_message(align).write(msg["content"])
+            st.chat_message("user" if msg["role"] == "user" else "assistant").write(msg["content"])
 
     if api_key:
         user_input = st.chat_input("Send a message:")
         if user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
-
-            with st.spinner("GPT is responding..."):
+            with st.spinner("GPT is typing..."):
                 try:
                     reply = get_response(st.session_state.messages, api_key)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     save_history(st.session_state.username, st.session_state.messages)
                     st.rerun()
                 except Exception as e:
-                    st.error("Request failed: " + str(e))
+                    st.error(f"Request failed: {e}")
     else:
         st.info("Please enter your OpenAI API key to start chatting.")
 
-# ---- MAIN PAGE ROUTING ----
-if st.session_state.page == "login":
-    login_page()
-elif st.session_state.page == "signup":
-    signup_page()
-elif st.session_state.page == "chat":
-    chat_page()
+
+PAGES = {"login": login, "signup": signup, "chat": chat}
+PAGES[st.session_state.page]()
